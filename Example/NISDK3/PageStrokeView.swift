@@ -40,6 +40,12 @@ class PageStrokeView: UIView {
         }
     }
     
+    // === ДОБАВЛЕНО: Очередь для потокобезопасной работы с буфером ===
+        private let dotBufferQueue = DispatchQueue(label: "com.neosmartpen.dotBufferQueue")
+        
+    // === ДОБАВЛЕНО: Таймер для отправки ===
+    private var batchSendTimer: Timer?
+    
     override init(frame: CGRect) {
         super.init(frame: frame)
         viewinit()
@@ -106,10 +112,14 @@ class PageStrokeView: UIView {
         Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             self.checkServerConnection()
         }
+        
+        // === ДОБАВЛЕНО: Запуск таймера для батч-отправки (каждые 200 мс) ===
+            batchSendTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.sendBatchedDots()
+        }
     }
     
     func updateConnectionIndicator(_ status: ConnectionStatus) {
-        print("Меняем индикатор")
+        //print("Меняем индикатор")
         DispatchQueue.main.async {
             UIView.animate(withDuration: 0.2) {
                 switch status {
@@ -124,10 +134,10 @@ class PageStrokeView: UIView {
             
             if status == .successFlash {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
-                    self.checkServerConnection()
+                    self.connectionIndicator.backgroundColor = .systemBlue
                 }
             }
-            print("Поменяли")
+            //print("Поменяли")
         }
     }
     
@@ -165,6 +175,7 @@ class PageStrokeView: UIView {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 5.0
+        //print("Connecting to: \(url)")
         
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         do {
@@ -229,72 +240,94 @@ class PageStrokeView: UIView {
             }
         }
         
-        let type = dot.dotType
-        var num_type = -1
-        switch type {
-        case .Down:
-            num_type = 0
-            break
-        case .Move:
-            num_type = 1
-            break
-        case .Up:
-            num_type = 2
-            break
+        // === ИЗМЕНЕНО: Потокобезопасное добавление точки в буфер ===
+        // Асинхронно кидаем в нашу очередь, чтобы не блокировать выполнение
+        dotBufferQueue.async {
+            PenHelper.shared.netBuffer.append(dot)
         }
-        // Отправка точки на сервер в реальном времени
-        let pointJSON: [String: Any] = [
-            "x": dot.x,
-            "y": dot.y,
-            "force": dot.force,
-            "time": dot.time,
-            "dotType": num_type,  // 0-Down, 1-Move, 2-Up
-            "page": dot.pageInfo.page,
-            "section": dot.pageInfo.section,
-            "owner": dot.pageInfo.owner ,
-            "note": dot.pageInfo.note
-        ]
-
-        // Получаем адрес сервера из настроек (UserDefaults)
-        let defaultBaseURL = "91.197.0.41:5252"  // Значение по умолчанию
+    }
+    
+    // === НОВАЯ ФУНКЦИЯ: Пакетная отправка точек ===
+    @objc private func sendBatchedDots() {
+        var dotsToSend: [Dot] = []
+        
+        // 1. Потокобезопасно забираем и очищаем буфер
+        // Используем sync, чтобы дождаться извлечения массива
+        dotBufferQueue.sync {
+            guard !PenHelper.shared.netBuffer.isEmpty else { return }
+            dotsToSend = PenHelper.shared.netBuffer
+            
+            // Очищаем буфер, сохраняя выделенную память под массив для оптимизации
+            PenHelper.shared.netBuffer.removeAll(keepingCapacity: true)
+        }
+        
+        // Если точек нет — ничего не делаем
+        if dotsToSend.isEmpty { return }
+        
+        // 2. Преобразуем массив [Dot] в массив словарей (JSON Array)
+        let jsonArray = dotsToSend.map { dot -> [String: Any] in
+            var num_type = -1
+            switch dot.dotType {
+            case .Down: num_type = 0
+            case .Move: num_type = 1
+            case .Up: num_type = 2
+            }
+            
+            return [
+                "x": dot.x,
+                "y": dot.y,
+                "force": dot.force,
+                "time": dot.time,
+                "dotType": num_type,
+                "page": dot.pageInfo.page,
+                "section": dot.pageInfo.section,
+                "owner": dot.pageInfo.owner,
+                "note": dot.pageInfo.note
+            ]
+        }
+        
+        // 3. Формируем запрос
+        let defaultBaseURL = "91.197.0.41:5252"
         let savedBaseURL = UserDefaults.standard.string(forKey: "ServerBaseURL") ?? defaultBaseURL
-
-        // Формируем полный URL: http://IP:порт/api/dot
-        var fullURLString = "http://\(savedBaseURL)/api/dot"
-
-        // Если пользователь ввёл полный URL с http/https — используем как есть
+        var fullURLString = "http://\(savedBaseURL)/api/dots" // ВНИМАНИЕ: сменил на /api/dots (множественное число)
+        
         if savedBaseURL.hasPrefix("http://") || savedBaseURL.hasPrefix("https://") {
-            fullURLString = "\(savedBaseURL)/api/dot"
+            fullURLString = "\(savedBaseURL)/api/dots"
         }
 
-        guard let url = URL(string: fullURLString) else {
-            print("Ошибка: некорректный URL сервера — \(fullURLString)")
+        guard let url = URL(string: fullURLString) else { return }
+        
+        // Сериализуем МАССИВ в JSON
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: jsonArray) else {
+            print("Ошибка сериализации JSON массива")
             return
         }
 
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: pointJSON) else {
-            print("Ошибка сериализации JSON")
-            return
-        }
-
+        // Если у тебя WebSocket (URLSessionWebSocketTask),
+        // тут будет: webSocketTask.send(.data(jsonData)) { ... }
+        // Ниже классический HTTP вариант, так как URLSession сам переиспользует TCP соединения под капотом (keep-alive)
+        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = jsonData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self = self else { return }
+            
             if let error = error {
-                print("Ошибка отправки точки: \(error.localizedDescription)")
-                self.checkServerConnection()
+                print("Ошибка отправки пакета точек: \(error.localizedDescription)")
+                self.checkServerConnection() // Можно закомментить, если падает слишком часто
             } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                print("Точка успешно отправлена")
+                print("Пакет из \(dotsToSend.count) точек успешно отправлен")
                 self.updateConnectionIndicator(.successFlash)
             } else {
-                print("Сервер ответил с ошибкой")
+                print("Сервер ответил с ошибкой на батч-отправку")
                 self.updateConnectionIndicator(.disconnected)
             }
         }.resume()
     }
+    
     
     //MARK: HoverView
     func addHoverLayout(_ dot: Dot) {

@@ -41,6 +41,7 @@ class PenHelper: PenDelegate{
     var pen:PenController?
     var isConnected: Bool?
     var needToConnect:Bool = false
+    var netBuffer:[Dot] = []
     var opened:Bool = false
     var connectingArr: [(pen: CBPeripheral, penAd: PenAdvertisementStruct)] = []
     var dotArr:[Dot] = []

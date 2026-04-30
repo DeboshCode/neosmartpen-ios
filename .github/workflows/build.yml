@@ -14,17 +14,21 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install CocoaPods
-        run: sudo gem install cocoapods
+        run: sudo gem install cocoapods --no-document
 
       - name: Pod install
         working-directory: Example
         run: pod install
 
-      - name: Build IPA (no signing)
+      - name: List schemes
+        working-directory: Example
+        run: xcodebuild -workspace NISDK3.xcworkspace -list
+
+      - name: Build app (no signing)
         working-directory: Example
         run: |
           xcodebuild \
-            -workspace NISDK3_Example.xcworkspace \
+            -workspace NISDK3.xcworkspace \
             -scheme NISDK3_Example \
             -configuration Debug \
             -sdk iphoneos \

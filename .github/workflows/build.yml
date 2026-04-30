@@ -29,7 +29,7 @@ jobs:
         run: |
           xcodebuild \
             -workspace NISDK3.xcworkspace \
-            -scheme NISDK3_Example \
+            -scheme NISDK3-Example \
             -configuration Debug \
             -sdk iphoneos \
             -derivedDataPath build \
@@ -42,7 +42,10 @@ jobs:
       - name: Package IPA
         run: |
           mkdir -p output/Payload
-          cp -r Example/build/Build/Products/Debug-iphoneos/NISDK3_Example.app output/Payload/
+          # The .app name comes from PRODUCT_NAME, find it dynamically
+          APP_PATH=$(find Example/build/Build/Products/Debug-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "Found app at: $APP_PATH"
+          cp -r "$APP_PATH" output/Payload/
           cd output
           zip -r ../NISDK3_Example.ipa Payload
 

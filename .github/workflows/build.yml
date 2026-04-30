@@ -1,0 +1,50 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CocoaPods
+        run: sudo gem install cocoapods
+
+      - name: Pod install
+        working-directory: Example
+        run: pod install
+
+      - name: Build IPA (no signing)
+        working-directory: Example
+        run: |
+          xcodebuild \
+            -workspace NISDK3_Example.xcworkspace \
+            -scheme NISDK3_Example \
+            -configuration Debug \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            clean build
+
+      - name: Package IPA
+        run: |
+          mkdir -p output/Payload
+          cp -r Example/build/Build/Products/Debug-iphoneos/NISDK3_Example.app output/Payload/
+          cd output
+          zip -r ../NISDK3_Example.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NISDK3_Example
+          path: NISDK3_Example.ipa
+          retention-days: 7

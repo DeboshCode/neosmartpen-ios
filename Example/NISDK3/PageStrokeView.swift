@@ -2,14 +2,18 @@
 //  PageStrokeView.swift
 //  NISDK3_Example
 //
-//  Responsible for: real-time stroke rendering and hover display.
-//  Network concerns (batching, health check, reconnect) are delegated
-//  to PointStreamSender.
+//  PageStrokeView: real-time stroke and hover rendering.
+//  PointStreamSender: batched dot transmission and server health monitoring.
+//
+//  Both classes live in this file because the iOS-SDK3.0 sample project's
+//  .xcodeproj cannot be edited without a Mac to add new source files.
 //
 
 import UIKit
 import CoreGraphics
 import NISDK3
+
+// MARK: - PageStrokeView
 
 class PageStrokeView: UIView {
 
@@ -18,9 +22,8 @@ class PageStrokeView: UIView {
     /// Set by MainViewController. Invoked when the server requests pen reconnection.
     var onNeedConnect: (() -> Void)?
 
-    /// When set to true, triggers onNeedConnect once.
-    /// Reset to false after a successful server health response so the next
-    /// reconnect signal can fire the callback again.
+    /// When set to true, triggers onNeedConnect once. Reset to false after a
+    /// successful server health response so the next reconnect signal can fire.
     var needToConnect: Bool = false {
         didSet {
             if needToConnect { onNeedConnect?() }
@@ -40,7 +43,7 @@ class PageStrokeView: UIView {
     private var hoverLayer: CAShapeLayer!
     private let hoverRadius: CGFloat = 5
 
-    // MARK: - Network
+    // MARK: - Network sender
 
     private var sender: PointStreamSender!
 
@@ -60,11 +63,6 @@ class PageStrokeView: UIView {
         setup()
     }
 
-    // deinit is intentionally minimal: PointStreamSender.deinit handles
-    // timer cancellation and task cancellation.
-
-    // MARK: - Setup
-
     private func setup() {
         backgroundColor = .clear
 
@@ -78,8 +76,6 @@ class PageStrokeView: UIView {
         hoverLayer = CAShapeLayer()
         layer.addSublayer(hoverLayer)
 
-        // translatesAutoresizingMaskIntoConstraints must be false
-        // when NSLayoutConstraint.activate is used (fixes previous constraint conflict).
         addSubview(indicator)
         NSLayoutConstraint.activate([
             indicator.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: -16),
@@ -89,19 +85,14 @@ class PageStrokeView: UIView {
         ])
         indicator.apply(.disconnected)
 
-        // Configure sender before start() to avoid a race where the first
-        // timer tick fires before the callbacks are assigned.
         sender = PointStreamSender()
         sender.onStatusChange = { [weak self] status in
             self?.indicator.apply(status)
         }
         sender.onReconnectRequired = { [weak self] in
-            // Routes through needToConnect so MainViewController's onNeedConnect
-            // closure is invoked (preserved public API behaviour).
             self?.needToConnect = true
         }
         sender.onConnected = { [weak self] in
-            // Reset flag so the next reconnect signal can re-trigger the callback.
             self?.needToConnect = false
         }
         sender.start()
@@ -109,9 +100,7 @@ class PageStrokeView: UIView {
 
     // MARK: - Dot rendering
 
-    /// Called on the main thread.
-    /// Caller contract: CBCentralManager is initialised with queue: nil (main queue),
-    /// so dotDelegate fires on main. Do not wrap in DispatchQueue.main.async here.
+    /// Called on the main thread (CBCentralManager uses queue: nil → main).
     func addDot(_ dot: Dot) {
         hoverLayer.isHidden = true
         let point = ScaleHelper.shared.getPoint(dot, frame.size)
@@ -124,7 +113,6 @@ class PageStrokeView: UIView {
         case .Up:
             dotPath.removeAllPoints()
         }
-        // Dispatched to sender's private queue — does not block the caller.
         sender.addToBuffer(dot)
     }
 
@@ -132,7 +120,7 @@ class PageStrokeView: UIView {
 
     func addHoverLayout(_ dot: Dot) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self = self else { return }
             let center = ScaleHelper.shared.getPoint(dot, self.frame.size)
             let path = UIBezierPath(
                 arcCenter: center,
@@ -145,8 +133,6 @@ class PageStrokeView: UIView {
             self.hoverLayer.strokeColor = UIColor.yellow.cgColor
             self.hoverLayer.lineWidth   = self.hoverRadius * 0.05
             self.hoverLayer.opacity     = 0.6
-            // hoverLayer is already in the layer hierarchy (added in setup).
-            // Toggle visibility instead of addSublayer on every call.
             self.hoverLayer.isHidden    = false
         }
     }
@@ -154,7 +140,6 @@ class PageStrokeView: UIView {
 
 // MARK: - ConnectionIndicatorView
 
-/// A 10×10 circle view that reflects the server connection state.
 private final class ConnectionIndicatorView: UIView {
 
     override init(frame: CGRect) {
@@ -168,7 +153,6 @@ private final class ConnectionIndicatorView: UIView {
     }
 
     private func commonInit() {
-        // Must be false for NSLayoutConstraint.activate to work correctly.
         translatesAutoresizingMaskIntoConstraints = false
         backgroundColor    = .red
         layer.cornerRadius = 5
@@ -191,6 +175,266 @@ private final class ConnectionIndicatorView: UIView {
                     self?.backgroundColor = .systemBlue
                 }
             }
+        }
+    }
+}
+
+// MARK: - PointStreamSender
+
+final class PointStreamSender {
+
+    // MARK: - Config
+
+    enum Config {
+        static let defaultBaseURL     = "91.197.0.41:5252"
+        static let userDefaultsURLKey = "ServerBaseURL"
+
+        static let flushInterval:   DispatchTimeInterval = .milliseconds(400)
+        static let healthInterval:  DispatchTimeInterval = .seconds(5)
+        static let requestTimeout:  TimeInterval         = 5.0
+        static let maxBufferSize    = 5_000
+        static let successFlashDuration: TimeInterval    = 0.5
+
+        enum Endpoint {
+            static let dots   = "/api/dots"
+            static let health = "/health"
+        }
+
+        enum HTTPStatus {
+            /// Non-standard code: server signals the pen must reconnect
+            /// (one-shot, sent only when "Reconnect" pressed in dashboard
+            /// and connectedPen == "NaN").
+            static let penReconnectRequired = 252
+            /// 405 Method Not Allowed still means server is alive.
+            static let methodNotAllowed     = 405
+        }
+    }
+
+    // MARK: - Callbacks (set before calling start())
+
+    var onStatusChange:      ((ConnectionStatus) -> Void)?
+    var onReconnectRequired: (() -> Void)?
+    var onConnected:         (() -> Void)?
+
+    // MARK: - Connection status
+
+    enum ConnectionStatus {
+        case disconnected
+        case connected
+        case successFlash
+    }
+
+    // MARK: - Private state (mutated only on `queue`)
+
+    private let queue = DispatchQueue(label: "com.neosmartpen.pointstream", qos: .utility)
+    private var flushTimer:  DispatchSourceTimer?
+    private var healthTimer: DispatchSourceTimer?
+    private var isFlushing       = false
+    private var isCheckingHealth = false
+    private var activeFlushTask: URLSessionDataTask?
+
+    init() {}
+
+    func start() {
+        startFlushTimer()
+        startHealthTimer()
+    }
+
+    deinit {
+        flushTimer?.cancel()
+        healthTimer?.cancel()
+        activeFlushTask?.cancel()
+    }
+
+    // MARK: - Buffer (external API)
+
+    func addToBuffer(_ dot: Dot) {
+        queue.async {
+            if PenHelper.shared.netBuffer.count >= Config.maxBufferSize {
+                PenHelper.shared.netBuffer.removeFirst()
+                print("[PointStreamSender] Buffer overflow — oldest dot dropped.")
+            }
+            PenHelper.shared.netBuffer.append(dot)
+        }
+    }
+
+    // MARK: - Timers
+
+    private func startFlushTimer() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + Config.flushInterval,
+                   repeating: Config.flushInterval,
+                   leeway: .milliseconds(50))
+        t.setEventHandler { [weak self] in self?.flushBuffer() }
+        t.resume()
+        flushTimer = t
+    }
+
+    private func startHealthTimer() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .seconds(1),
+                   repeating: Config.healthInterval,
+                   leeway: .milliseconds(200))
+        t.setEventHandler { [weak self] in self?.checkServerHealth() }
+        t.resume()
+        healthTimer = t
+    }
+
+    // MARK: - Flush (on queue)
+
+    private func flushBuffer() {
+        guard !isFlushing else { return }
+        guard !PenHelper.shared.netBuffer.isEmpty else { return }
+
+        let snapshot = PenHelper.shared.netBuffer
+        PenHelper.shared.netBuffer.removeAll(keepingCapacity: true)
+        isFlushing = true
+
+        guard let url  = buildURL(endpoint: Config.Endpoint.dots),
+              let body = encodeDotsToJSON(snapshot) else {
+            PenHelper.shared.netBuffer.insert(contentsOf: snapshot, at: 0)
+            isFlushing = false
+            return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod      = "POST"
+        req.httpBody        = body
+        req.timeoutInterval = Config.requestTimeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let task = URLSession.shared.dataTask(with: req) { [weak self] _, response, error in
+            guard let self = self else { return }
+            self.queue.async {
+                defer { self.isFlushing = false }
+                if let error = error {
+                    PenHelper.shared.netBuffer.insert(
+                        contentsOf: snapshot,
+                        at: PenHelper.shared.netBuffer.startIndex
+                    )
+                    print("[PointStreamSender] flush error: \(error.localizedDescription). "
+                          + "\(snapshot.count) dots returned to buffer.")
+                    self.notifyStatus(.disconnected)
+                    return
+                }
+                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    self.notifyStatus(.successFlash)
+                } else {
+                    self.notifyStatus(.disconnected)
+                }
+            }
+        }
+        activeFlushTask = task
+        task.resume()
+    }
+
+    // MARK: - Health check (on queue)
+
+    private func checkServerHealth() {
+        guard !isCheckingHealth else { return }
+        isCheckingHealth = true
+
+        let isConn = PenHelper.shared.isConnected ?? false
+        let penID  = isConn ? (PenHelper.shared.pen?.macAddress ?? "NaN") : "NaN"
+
+        guard let url  = buildURL(endpoint: Config.Endpoint.health),
+              let body = try? JSONSerialization.data(withJSONObject: ["connectedPen": penID]) else {
+            isCheckingHealth = false
+            notifyStatus(.disconnected)
+            return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod      = "POST"
+        req.httpBody        = body
+        req.timeoutInterval = Config.requestTimeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        URLSession.shared.dataTask(with: req) { [weak self] _, response, error in
+            guard let self = self else { return }
+            self.queue.async {
+                defer { self.isCheckingHealth = false }
+
+                if error != nil {
+                    self.notifyStatus(.disconnected)
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    self.notifyStatus(.disconnected)
+                    return
+                }
+
+                switch http.statusCode {
+                case Config.HTTPStatus.penReconnectRequired:
+                    self.handleReconnectRequired()
+                    self.notifyStatus(.connected)
+
+                case 200...299, Config.HTTPStatus.methodNotAllowed:
+                    self.notifyStatus(.connected)
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onConnected?()
+                    }
+
+                default:
+                    self.notifyStatus(.disconnected)
+                }
+            }
+        }.resume()
+    }
+
+    private func handleReconnectRequired() {
+        if !PenHelper.shared.opened {
+            DispatchQueue.main.async { [weak self] in
+                self?.onReconnectRequired?()
+            }
+        } else {
+            DispatchQueue.main.async {
+                PenFinder.shared.scanStop()
+                PenFinder.shared.scan(10.0)
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func buildURL(endpoint: String) -> URL? {
+        let base = UserDefaults.standard.string(forKey: Config.userDefaultsURLKey)
+                   ?? Config.defaultBaseURL
+        let full: String
+        if base.hasPrefix("http://") || base.hasPrefix("https://") {
+            full = base + endpoint
+        } else {
+            full = "http://\(base)\(endpoint)"
+        }
+        return URL(string: full)
+    }
+
+    private func encodeDotsToJSON(_ dots: [Dot]) -> Data? {
+        let array: [[String: Any]] = dots.map { dot in
+            let dotTypeCode: Int
+            switch dot.dotType {
+            case .Down: dotTypeCode = 0
+            case .Move: dotTypeCode = 1
+            case .Up:   dotTypeCode = 2
+            }
+            return [
+                "x":       dot.x,
+                "y":       dot.y,
+                "force":   dot.force,
+                "time":    dot.time,
+                "dotType": dotTypeCode,
+                "page":    dot.pageInfo.page,
+                "section": dot.pageInfo.section,
+                "owner":   dot.pageInfo.owner,
+                "note":    dot.pageInfo.note
+            ]
+        }
+        return try? JSONSerialization.data(withJSONObject: array)
+    }
+
+    private func notifyStatus(_ status: ConnectionStatus) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onStatusChange?(status)
         }
     }
 }

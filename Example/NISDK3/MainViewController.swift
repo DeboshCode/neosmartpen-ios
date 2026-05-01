@@ -57,14 +57,7 @@ class MainViewController: UIViewController {
         scrollView.delegate = self
         ActionHelper.shared.delegate = self
         
-        // Restore identifier — iOS будет хранить состояние нашего CBCentralManager
-        // и сможет разбудить приложение в фоне при появлении BT-событий (например,
-        // когда ручка снова начнёт advertise после включения).
-        centralManager = CBCentralManager(
-            delegate: self,
-            queue: nil,
-            options: [CBCentralManagerOptionRestoreIdentifierKey: "com.deboshcode.neopen.central"]
-        )
+        centralManager = CBCentralManager(delegate: self, queue: nil)
         
         pencilSetBtn.isEnabled = false
         pencilSetBtn.tintColor = UIColor.clear
@@ -327,33 +320,11 @@ class MainViewController: UIViewController {
 
 extension MainViewController: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        switch central.state {
+        switch(central.state) {
         case .poweredOff:
-            print("[BT] poweredOff")
-        case .poweredOn:
-            print("[BT] poweredOn")
-            // Если приложение было разбужено iOS из фона и ручка не подключена —
-            // запускаем скан, чтобы PenFinder нашёл и подключился по сохранённому MAC.
-            if PenHelper.shared.isConnected != true {
-                PenFinder.shared.scan(10.0)
-            }
+            print("setting form")
         default:
-            print("[BT] state =", central.state.rawValue)
-        }
-    }
-
-    // Вызывается iOS при пробуждении приложения из фона по BT-событию.
-    // Здесь iOS передаёт нам "восстановленное" состояние центрального менеджера —
-    // подключённые/ожидающие peripherals и активные scan'ы.
-    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
-        print("[BTRestore] willRestoreState fired")
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
-            print("[BTRestore] restored peripherals: \(peripherals.count)")
-        }
-        // Триггерим скан в любом случае — PenFinder сам найдёт ручку по MAC
-        // и подключится (если включён нужный флаг и MAC совпадает).
-        DispatchQueue.main.async {
-            PenFinder.shared.scan(10.0)
+            print("central.state", central.state.rawValue)
         }
     }
 }

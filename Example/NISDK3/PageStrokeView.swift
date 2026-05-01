@@ -101,20 +101,31 @@ class PageStrokeView: UIView {
 
     // MARK: - Dot rendering
 
-    /// Called on the main thread (CBCentralManager uses queue: nil → main).
+    /// Defensively dispatches UI work to main thread.
+    /// In practice MainViewController's CBCentralManager uses queue: nil (main),
+    /// so the callback chain is on main — but the NISDK3 framework's internal
+    /// pen data parsing might run on a background queue. Dispatching to main
+    /// here guarantees CALayer / UIBezierPath access is always on main thread,
+    /// preventing the rare random crash seen in production.
     func addDot(_ dot: Dot) {
-        hoverLayer.isHidden = true
-        let point = ScaleHelper.shared.getPoint(dot, frame.size)
-        switch dot.dotType {
-        case .Down:
-            dotPath.move(to: point)
-        case .Move:
-            dotPath.addLine(to: point)
-            shapelayer.path = dotPath.cgPath
-        case .Up:
-            dotPath.removeAllPoints()
-        }
+        // Network write — thread-safe, dispatched to sender's own queue.
         sender.addToBuffer(dot)
+
+        // UI work — always on main.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.hoverLayer.isHidden = true
+            let point = ScaleHelper.shared.getPoint(dot, self.frame.size)
+            switch dot.dotType {
+            case .Down:
+                self.dotPath.move(to: point)
+            case .Move:
+                self.dotPath.addLine(to: point)
+                self.shapelayer.path = self.dotPath.cgPath
+            case .Up:
+                self.dotPath.removeAllPoints()
+            }
+        }
     }
 
     // MARK: - Hover rendering

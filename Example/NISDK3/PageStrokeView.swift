@@ -201,7 +201,7 @@ final class PointStreamSender {
         static let defaultBaseURL     = "91.197.0.41:5252"
         static let userDefaultsURLKey = "ServerBaseURL"
 
-        static let flushInterval:   DispatchTimeInterval = .milliseconds(400)
+        static let flushInterval:   DispatchTimeInterval = .milliseconds(250)
         static let healthInterval:  DispatchTimeInterval = .seconds(5)
         static let requestTimeout:  TimeInterval         = 5.0
         static let maxBufferSize    = 5_000

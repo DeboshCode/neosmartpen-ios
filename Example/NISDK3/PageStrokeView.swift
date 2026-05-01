@@ -77,9 +77,10 @@ class PageStrokeView: UIView {
         layer.addSublayer(hoverLayer)
 
         addSubview(indicator)
+        // Match original visible position (CGRect x: 355, y: 0, w/h: 10).
         NSLayoutConstraint.activate([
-            indicator.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: -16),
-            indicator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -160),
+            indicator.topAnchor.constraint(equalTo: topAnchor, constant: 0),
+            indicator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -15),
             indicator.widthAnchor.constraint(equalToConstant: 10),
             indicator.heightAnchor.constraint(equalToConstant: 10)
         ])
@@ -236,6 +237,12 @@ final class PointStreamSender {
     init() {}
 
     func start() {
+        // Permit PenSearchViewController to auto-connect by saved MAC.
+        // (PenSearchViewController:164 reads this flag as a permission gate.)
+        // The flag is set once at startup; PenSearchVC's MAC match check
+        // ensures we still only auto-connect to the user-configured device.
+        PenHelper.shared.needToConnect = true
+
         startFlushTimer()
         startHealthTimer()
     }
